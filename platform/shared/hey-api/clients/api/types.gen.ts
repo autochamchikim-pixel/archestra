@@ -37454,9 +37454,6 @@ export type InstallMcpServerData = {
         accessToken?: string;
         isByosVault?: boolean;
         serviceAccount?: string;
-        presetFieldValues?: {
-            [key: string]: UserConfigFieldDefaultInput;
-        };
     };
     path?: never;
     query?: never;
