@@ -37,10 +37,12 @@ function FileStatusBadge({
   processingStatus,
   embeddingStatus,
   processingError,
+  embeddingError,
 }: {
   processingStatus?: string;
   embeddingStatus: string;
   processingError?: string | null;
+  embeddingError?: string | null;
 }) {
   if (processingStatus && processingStatus !== "completed") {
     const variants = {
@@ -95,18 +97,45 @@ function FileStatusBadge({
     failed: "Failed",
   };
 
+  const embeddingErrorLabels = {
+    rate_limit: "Embedding provider rate limit exceeded. Try again later.",
+    api_key_error:
+      "Embedding API key failed authentication. Check the configured API key.",
+    model_not_found:
+      "Embedding model was not found. Check the configured embedding model.",
+    api_server_error:
+      "Embedding provider returned a server error. Try again later.",
+    dimensions_mismatch:
+      "Embedding dimensions do not match the database vector dimensions.",
+    unknown: "Embedding failed for an unknown reason.",
+  } as const;
+
+  const embeddingTooltip =
+    embeddingStatus === "failed"
+      ? (embeddingErrorLabels[
+          embeddingError as keyof typeof embeddingErrorLabels
+        ] ?? embeddingErrorLabels.unknown)
+      : embeddingStatus === "pending"
+        ? "File is queued for indexing"
+        : "Indexing file";
+
   return (
-    <Badge
-      variant={
-        variants[embeddingStatus as keyof typeof variants] ?? "secondary"
-      }
-      className="capitalize text-xs"
-    >
-      {embeddingStatus === "processing" && (
-        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-      )}
-      {labels[embeddingStatus as keyof typeof labels] ?? embeddingStatus}
-    </Badge>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          variant={
+            variants[embeddingStatus as keyof typeof variants] ?? "secondary"
+          }
+          className="capitalize text-xs cursor-help"
+        >
+          {embeddingStatus === "processing" && (
+            <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+          )}
+          {labels[embeddingStatus as keyof typeof labels] ?? embeddingStatus}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>{embeddingTooltip}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -125,6 +154,7 @@ function FileStatusCell({
       processingStatus={current.processingStatus}
       embeddingStatus={current.embeddingStatus}
       processingError={current.processingError}
+      embeddingError={current.embeddingError}
     />
   );
 }
