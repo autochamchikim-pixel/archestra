@@ -49,6 +49,13 @@ function makeEmbeddingContext() {
   };
 }
 
+async function makeOpenAIStatusError(status: number, message: string) {
+  const err = Object.assign(new Error(message), { status });
+  const OpenAIMod = (await import("openai")).default;
+  Object.setPrototypeOf(err, OpenAIMod.APIError.prototype);
+  return err;
+}
+
 describe("EmbeddingService", () => {
   test("processes pending document — chunks get embeddings, status completed", async ({
     makeOrganization,
@@ -145,6 +152,7 @@ describe("EmbeddingService", () => {
 
     const updated = await KbDocumentModel.findById(doc.id);
     expect(updated?.embeddingStatus).toBe("failed");
+    expect(updated?.embeddingError).toBe("rate_limit");
   });
 
   test("no chunks marks document as completed with chunkCount 0", async ({
@@ -225,13 +233,7 @@ describe("EmbeddingService", () => {
 
     const emb = makeFakeEmbedding(10);
 
-    // Create a retryable error that matches the isRetryableError check
-    const rateLimitError = Object.assign(new Error("Rate limited"), {
-      status: 429,
-    });
-    // Make it pass the instanceof check in the actual OpenAI module
-    const OpenAIMod = (await import("openai")).default;
-    Object.setPrototypeOf(rateLimitError, OpenAIMod.APIError.prototype);
+    const rateLimitError = await makeOpenAIStatusError(429, "Rate limited");
 
     // First call fails with 429, second succeeds
     mockEmbeddingsCreate
@@ -276,24 +278,147 @@ describe("EmbeddingService", () => {
       },
     ]);
 
-    const OpenAIMod2 = (await import("openai")).default;
-    const makeServerError = () => {
-      const err = Object.assign(new Error("Server error"), { status: 500 });
-      Object.setPrototypeOf(err, OpenAIMod2.APIError.prototype);
-      return err;
-    };
+    const makeServerError = () => makeOpenAIStatusError(500, "Server error");
 
     // Fail all 3 attempts
     mockEmbeddingsCreate
-      .mockRejectedValueOnce(makeServerError())
-      .mockRejectedValueOnce(makeServerError())
-      .mockRejectedValueOnce(makeServerError());
+      .mockRejectedValueOnce(await makeServerError())
+      .mockRejectedValueOnce(await makeServerError())
+      .mockRejectedValueOnce(await makeServerError());
 
     await embeddingService.processDocument(doc.id, makeEmbeddingContext());
 
     const updated = await KbDocumentModel.findById(doc.id);
     expect(updated?.embeddingStatus).toBe("failed");
+    expect(updated?.embeddingError).toBe("api_server_error");
     expect(mockEmbeddingsCreate).toHaveBeenCalledTimes(3);
+  });
+
+  test("stores api key error reason on authentication failure", async ({
+    makeOrganization,
+    makeKnowledgeBase,
+    makeKnowledgeBaseConnector,
+  }) => {
+    const org = await makeOrganization();
+    const kb = await makeKnowledgeBase(org.id);
+    const connector = await makeKnowledgeBaseConnector(kb.id, org.id);
+
+    const doc = await KbDocumentModel.create({
+      connectorId: connector.id,
+      organizationId: org.id,
+      title: "Auth Fail Doc",
+      content: "Content",
+      contentHash: "hash-auth-fail",
+      embeddingStatus: "pending",
+    });
+
+    await KbChunkModel.insertMany([
+      {
+        documentId: doc.id,
+        content: "Chunk",
+        chunkIndex: 0,
+      },
+    ]);
+
+    mockEmbeddingsCreate.mockRejectedValueOnce(
+      await makeOpenAIStatusError(401, "Invalid API key"),
+    );
+
+    await embeddingService.processDocument(doc.id, makeEmbeddingContext());
+
+    const updated = await KbDocumentModel.findById(doc.id);
+    expect(updated?.embeddingStatus).toBe("failed");
+    expect(updated?.embeddingError).toBe("api_key_error");
+  });
+
+  test("stores model not found error reason", async ({
+    makeOrganization,
+    makeKnowledgeBase,
+    makeKnowledgeBaseConnector,
+  }) => {
+    const org = await makeOrganization();
+    const kb = await makeKnowledgeBase(org.id);
+    const connector = await makeKnowledgeBaseConnector(kb.id, org.id);
+
+    const doc = await KbDocumentModel.create({
+      connectorId: connector.id,
+      organizationId: org.id,
+      title: "Missing Model Doc",
+      content: "Content",
+      contentHash: "hash-missing-model",
+      embeddingStatus: "pending",
+    });
+
+    await KbChunkModel.insertMany([
+      {
+        documentId: doc.id,
+        content: "Chunk",
+        chunkIndex: 0,
+      },
+    ]);
+
+    mockEmbeddingsCreate.mockRejectedValueOnce(
+      await makeOpenAIStatusError(404, "Model does not exist"),
+    );
+
+    await embeddingService.processDocument(doc.id, makeEmbeddingContext());
+
+    const updated = await KbDocumentModel.findById(doc.id);
+    expect(updated?.embeddingStatus).toBe("failed");
+    expect(updated?.embeddingError).toBe("model_not_found");
+  });
+
+  test("stores dimensions mismatch error reason", async ({
+    makeOrganization,
+    makeKnowledgeBase,
+    makeKnowledgeBaseConnector,
+  }) => {
+    const org = await makeOrganization();
+    const kb = await makeKnowledgeBase(org.id);
+    const connector = await makeKnowledgeBaseConnector(kb.id, org.id);
+
+    const doc = await KbDocumentModel.create({
+      connectorId: connector.id,
+      organizationId: org.id,
+      title: "Dimension Mismatch Doc",
+      content: "Content",
+      contentHash: "hash-dimension-mismatch",
+      embeddingStatus: "pending",
+    });
+
+    await KbChunkModel.insertMany([
+      {
+        documentId: doc.id,
+        content: "Chunk",
+        chunkIndex: 0,
+      },
+    ]);
+
+    mockEmbeddingsCreate.mockResolvedValueOnce({
+      object: "list",
+      data: [
+        {
+          object: "embedding",
+          embedding: makeFakeEmbedding(1),
+          index: 0,
+        },
+      ],
+      model: "text-embedding-3-small",
+      usage: { prompt_tokens: 5, total_tokens: 5 },
+    });
+
+    const updateEmbeddingsSpy = vi
+      .spyOn(KbChunkModel, "updateEmbeddings")
+      .mockRejectedValueOnce(
+        new Error("expected 1536 dimensions, not 3072 for vector embedding"),
+      );
+
+    await embeddingService.processDocument(doc.id, makeEmbeddingContext());
+    updateEmbeddingsSpy.mockRestore();
+
+    const updated = await KbDocumentModel.findById(doc.id);
+    expect(updated?.embeddingStatus).toBe("failed");
+    expect(updated?.embeddingError).toBe("dimensions_mismatch");
   });
 
   test("processDocuments batches chunks from multiple documents into single API call", async ({
@@ -454,10 +579,12 @@ describe("EmbeddingService", () => {
 
     const updated1 = await KbDocumentModel.findById(doc1.id);
     expect(updated1?.embeddingStatus).toBe("failed");
+    expect(updated1?.embeddingError).toBe("unknown");
 
     // doc2 had no chunks, so it completes regardless
     const updated2 = await KbDocumentModel.findById(doc2.id);
     expect(updated2?.embeddingStatus).toBe("completed");
+    expect(updated2?.embeddingError).toBeNull();
     expect(updated2?.chunkCount).toBe(0);
   });
 });
