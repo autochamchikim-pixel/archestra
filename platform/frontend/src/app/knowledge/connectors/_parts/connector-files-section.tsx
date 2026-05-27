@@ -33,6 +33,10 @@ const ACCEPTED_EXTENSIONS =
   ".txt,.md,.csv,.json,.xml,.html,.htm,.pdf,.doc,.docx,.zip";
 const MAX_FILE_SIZE_MB = 10;
 
+type UploadedFileWithEmbeddingError = UploadedFile & {
+  embeddingError?: string | null;
+};
+
 function FileStatusBadge({
   processingStatus,
   embeddingStatus,
@@ -147,7 +151,7 @@ function FileStatusCell({
   connectorId: string;
 }) {
   const { data: freshFile } = useConnectorFile(connectorId, file.id);
-  const current = freshFile ?? file;
+  const current = (freshFile ?? file) as UploadedFileWithEmbeddingError;
 
   return (
     <FileStatusBadge
