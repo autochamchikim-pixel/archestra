@@ -2,14 +2,28 @@ import {
   index,
   integer,
   jsonb,
+  pgEnum,
   pgTable,
   text,
   timestamp,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { EmbeddingStatus, KbDocumentMetadata } from "@/types/kb-document";
+import type {
+  EmbeddingError,
+  EmbeddingStatus,
+  KbDocumentMetadata,
+} from "@/types/kb-document";
 import knowledgeBaseConnectorsTable from "./knowledge-base-connector";
+
+export const embeddingErrorEnum = pgEnum("embedding_error", [
+  "rate_limit",
+  "api_key_error",
+  "model_not_found",
+  "api_server_error",
+  "dimensions_mismatch",
+  "unknown",
+]);
 
 const kbDocumentsTable = pgTable(
   "kb_documents",
@@ -32,6 +46,8 @@ const kbDocumentsTable = pgTable(
       .$type<EmbeddingStatus>()
       .notNull()
       .default("pending"),
+    embeddingError:
+      embeddingErrorEnum("embedding_error").$type<EmbeddingError>(),
     chunkCount: integer("chunk_count").notNull().default(0),
     createdAt: timestamp("created_at", { mode: "date" }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { mode: "date" })
