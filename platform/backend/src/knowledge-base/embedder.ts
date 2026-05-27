@@ -1,13 +1,17 @@
 import { addNomicTaskPrefix, EMBEDDING_BATCH_SIZE } from "@shared";
 import logger from "@/logging";
 import { KbChunkModel, KbDocumentModel } from "@/models";
+import type { EmbeddingError } from "@/types";
 import {
+  AzureEmbeddingError,
   callEmbedding,
   type EmbeddingApiResponse,
   type EmbeddingInput,
+  GeminiEmbeddingError,
   getEmbeddingDiscriminator,
   getEmbeddingRetryDelayMs,
   isRetryableEmbeddingError,
+  OpenAIEmbeddingError,
 } from "./embedding-clients";
 import {
   buildEmbeddingInteraction,
@@ -40,7 +44,10 @@ class EmbeddingService {
       return;
     }
 
-    await KbDocumentModel.update(documentId, { embeddingStatus: "processing" });
+    await KbDocumentModel.update(documentId, {
+      embeddingStatus: "processing",
+      embeddingError: null,
+    });
 
     try {
       const chunks = await KbChunkModel.findByDocument(documentId);
@@ -48,6 +55,7 @@ class EmbeddingService {
       if (chunks.length === 0) {
         await KbDocumentModel.update(documentId, {
           embeddingStatus: "completed",
+          embeddingError: null,
           chunkCount: 0,
         });
         return;
@@ -81,6 +89,7 @@ class EmbeddingService {
 
       await KbDocumentModel.update(documentId, {
         embeddingStatus: "completed",
+        embeddingError: null,
         chunkCount: chunks.length,
       });
 
@@ -91,6 +100,7 @@ class EmbeddingService {
     } catch (error) {
       await KbDocumentModel.update(documentId, {
         embeddingStatus: "failed",
+        embeddingError: classifyEmbeddingError(error),
       });
       logger.error(
         {
@@ -151,6 +161,7 @@ class EmbeddingService {
 
       await KbDocumentModel.update(documentId, {
         embeddingStatus: "processing",
+        embeddingError: null,
       });
 
       const chunks = await KbChunkModel.findByDocument(documentId);
@@ -158,6 +169,7 @@ class EmbeddingService {
       if (chunks.length === 0) {
         await KbDocumentModel.update(documentId, {
           embeddingStatus: "completed",
+          embeddingError: null,
           chunkCount: 0,
         });
         continue;
@@ -187,6 +199,7 @@ class EmbeddingService {
       for (const { documentId } of docChunkMap) {
         await KbDocumentModel.update(documentId, {
           embeddingStatus: "pending",
+          embeddingError: null,
         });
       }
       return;
@@ -195,6 +208,7 @@ class EmbeddingService {
     const ctx = orgConfig.config;
     const embeddingResults = new Map<string, number[]>();
     const failedChunkIds = new Set<string>();
+    const failedChunkErrors = new Map<string, EmbeddingError>();
 
     for (let i = 0; i < allChunks.length; i += EMBEDDING_BATCH_SIZE) {
       const batch = allChunks.slice(i, i + EMBEDDING_BATCH_SIZE);
@@ -223,6 +237,7 @@ class EmbeddingService {
         );
         for (const chunk of batch) {
           failedChunkIds.add(chunk.chunkId);
+          failedChunkErrors.set(chunk.chunkId, classifyEmbeddingError(error));
         }
       }
     }
@@ -238,8 +253,12 @@ class EmbeddingService {
     for (const { documentId, chunkIds, chunkCount } of docChunkMap) {
       const anyFailed = chunkIds.some((id) => failedChunkIds.has(id));
       if (anyFailed) {
+        const embeddingError =
+          chunkIds.map((id) => failedChunkErrors.get(id)).find(Boolean) ??
+          "unknown";
         await KbDocumentModel.update(documentId, {
           embeddingStatus: "failed",
+          embeddingError,
         });
         logger.error(
           { documentId, runId: connectorRunId },
@@ -248,6 +267,7 @@ class EmbeddingService {
       } else {
         await KbDocumentModel.update(documentId, {
           embeddingStatus: "completed",
+          embeddingError: null,
           chunkCount,
         });
         logger.info(
@@ -344,4 +364,64 @@ function chunkToEmbeddingInput(
     content + (metadataSuffix ?? ""),
     "search_document",
   );
+}
+
+function classifyEmbeddingError(error: unknown): EmbeddingError {
+  const message = error instanceof Error ? error.message : String(error);
+  const lowerMessage = message.toLowerCase();
+  const status = getEmbeddingErrorStatus(error);
+
+  if (
+    lowerMessage.includes("dimension") &&
+    (lowerMessage.includes("vector") ||
+      lowerMessage.includes("embedding") ||
+      lowerMessage.includes("expected"))
+  ) {
+    return "dimensions_mismatch";
+  }
+
+  if (status === 429 || lowerMessage.includes("rate limit")) {
+    return "rate_limit";
+  }
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    lowerMessage.includes("invalid api key") ||
+    lowerMessage.includes("unauthorized") ||
+    lowerMessage.includes("forbidden")
+  ) {
+    return "api_key_error";
+  }
+
+  if (
+    status === 404 ||
+    lowerMessage.includes("model not found") ||
+    lowerMessage.includes("model does not exist")
+  ) {
+    return "model_not_found";
+  }
+
+  if (status !== undefined && status >= 500) {
+    return "api_server_error";
+  }
+
+  return "unknown";
+}
+
+function getEmbeddingErrorStatus(error: unknown): number | undefined {
+  if (
+    error instanceof AzureEmbeddingError ||
+    error instanceof GeminiEmbeddingError ||
+    error instanceof OpenAIEmbeddingError
+  ) {
+    return error.status;
+  }
+
+  if (typeof error === "object" && error !== null && "status" in error) {
+    const status = (error as { status?: unknown }).status;
+    return typeof status === "number" ? status : undefined;
+  }
+
+  return undefined;
 }
